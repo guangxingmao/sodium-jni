@@ -1,0 +1,272 @@
+apply plugin: 'com.android.library'
+apply plugin: 'maven-publish'
+apply plugin: 'signing'
+
+import org.gradle.internal.os.OperatingSystem;
+
+if (project==rootProject) {
+    apply plugin: 'io.codearte.nexus-staging'
+}
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+    google()
+}
+
+android {
+    namespace 'org.kaliumjni.lib'  // Required for AGP 8.0+
+    compileSdkVersion 35
+    ndkVersion "29.0.14206865"  // NDK r29 (or use NDK r28+)
+
+    defaultConfig {
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        minSdkVersion 26
+        targetSdkVersion 35
+        versionCode project.VERSION_CODE.toInteger()
+        versionName project.VERSION_NAME
+        
+        ndk {
+            // NDK r28+ removed armeabi support
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    lintOptions {
+        abortOnError false
+    }
+
+    // To let the libs be included in other projects
+    externalNativeBuild {
+        ndkBuild {
+            path "jni/Android.mk"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    // TODO are these required in this lib project?
+    //compile fileTree(include: ['*.jar'], dir: 'libs')
+   //compile 'com.android.support:appcompat-v7:23.1.1'
+   testImplementation group: 'com.google.guava', name: 'guava', version: '32.1.3-jre'
+   testImplementation 'junit:junit:4.13.2'
+   androidTestImplementation group: 'com.google.guava', name: 'guava', version: '32.1.3-jre'
+   androidTestImplementation 'junit:junit:4.13.2'
+   androidTestImplementation 'androidx.test:runner:1.5.2'
+   androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+}
+
+buildscript {
+    repositories {
+        mavenCentral()
+        mavenLocal()
+        google()
+    }
+    dependencies {
+        // AGP 8.2.2 requires Java 11+ and supports NDK r28+
+        classpath 'com.android.tools.build:gradle:8.2.2'
+        classpath "io.codearte.gradle.nexus:gradle-nexus-staging-plugin:0.30.0"
+    }
+}
+
+[
+  // Removed 'arm' (armv6) as NDK r28+ doesn't support armeabi anymore
+  [input_arch: 'armv7-a', output_arch: 'armv7-a',  ndk_platform: 'android-21' ],
+  [input_arch: 'armv8-a', output_arch: 'armv8-a',  ndk_platform: 'android-21'],
+  [input_arch: 'x86',     output_arch: 'i686',     ndk_platform: 'android-21' ],
+  [input_arch: 'x86_64',  output_arch: 'westmere', ndk_platform: 'android-21'],
+].each { opts -> 
+
+  def taskname = "compileNative_${opts['output_arch']}"
+  
+  task(taskname) {
+    inputs.dir  fileTree(dir: 'libsodium/src', exclude: ['libsodium/**/.libs', 'libsodium/*.la', 'libsodium/**/*.lo', 'libsodium/**/*.o', 'libsodium/**/*.Plo', '**/Makefile', '**/Makefile.in', '**/.deps/*', '**/.libs/*'])
+    outputs.dir("libsodium/libsodium-android-${opts['output_arch']}")
+    doFirst {
+        exec {
+          workingDir 'libsodium'
+          commandLine './autogen.sh'
+        }
+        exec {
+          workingDir 'libsodium'
+          environment 'LIBSODIUM_FULL_BUILD','true'
+          executable "dist-build/android-${opts['input_arch']}.sh"
+          environment 'CONFIG_SITE', '' // This makes ./configure load information about the host and guess this is information valid for the target. However, the target is Android here, the host information does not apply. 
+          //environment 'NDK_PLATFORM', opts['ndk_platform'] // The lowest possible value is android-9 here. Certain Android API levels below android-16 do not have posix_memalign. This should not make a difference in practice, as android-9 has MAP_ANONYMOUS and HAVE_MMAP and posix_memalign is only used as fallback in the current libsodium code if MAP_ANONYMOUS or HAVE_MMAP are unavailable.
+        }
+    }
+  }
+  
+  gradle.projectsEvaluated {
+    externalNativeBuildDebug.dependsOn   taskname
+    externalNativeBuildRelease.dependsOn taskname
+  }
+}
+
+apply plugin: "c"
+
+model {
+  flavors {
+    host // Also compile the native library for the host OS to allow running tests which access the library on the host OS.
+  }
+  repositories {
+    libs(PrebuiltLibraries) {
+      jdk {
+        headers.srcDir "${System.getenv("JAVA_HOME")}/include"
+        headers.srcDir "${System.getenv("JAVA_HOME")}/include/linux" // this seems to be host OS dependent, but should be host OS independent
+        headers.srcDir "${System.getenv("JAVA_HOME")}/include/darwin"
+      }
+      sodium {
+        headers.srcDir "${projectDir}/libsodium/libsodium-host/include"
+        binaries.withType(StaticLibraryBinary) { binary ->
+          staticLibraryFile = file("${projectDir}/libsodium/libsodium-host/lib/libsodium.a")
+        }       
+      }
+    }
+  }
+  components {
+    sodiumjni(NativeLibrarySpec) {
+      sources {
+        c {
+          source {
+            srcDir "${projectDir}/jni"
+            include "sodium_wrap.c"
+            include "dummy.c"
+          }
+          lib library: 'jdk',    linkage: 'api'
+          lib library: 'sodium', linkage: 'static'
+        }
+        binaries.all {
+          if (OperatingSystem.current().isLinux()) {
+              //flag not on macos clang
+              linker.args "-Wl,-Bsymbolic" // to work around error "shared library text segment is not shareable"
+          }
+        }
+      }
+    }
+  }
+}
+
+tasks.withType(Test) { task ->
+  systemProperty "java.library.path", "${projectDir}/build/libs/sodiumjni/shared"
+  task.dependsOn('sodiumjniSharedLibrary')
+}
+
+task('generateSWIGsource') {
+  inputs.dir   fileTree(dir: "${projectDir}/jni")
+  outputs.dir("${projectDir}/src/main/java/org/libsodium/jni")
+  outputs.file "${projectDir}/jni/sodium_wrap.c"
+  doFirst {
+    exec {
+      workingDir "${projectDir}/jni"
+      commandLine 'swig','-java','-package','org.libsodium.jni','-outdir','../src/main/java/org/libsodium/jni','sodium.i'
+    }
+  }
+}
+
+gradle.projectsEvaluated {
+  generateJsonModelDebug.dependsOn   'generateSWIGsource'
+  generateJsonModelRelease.dependsOn 'generateSWIGsource'
+}
+
+
+afterEvaluate {
+    publishing {
+        publications {
+            release(MavenPublication) {
+                // For Android Library, use the generated component after evaluation
+                if (components.findByName('release')) {
+                    from components.release
+                } else {
+                    // Fallback: manually add artifacts
+                    artifact("$buildDir/outputs/aar/${project.name}-release.aar")
+                }
+                
+                groupId = project.GROUP
+                artifactId = project.POM_ARTIFACT_ID
+                version = project.VERSION_NAME
+                
+                artifact sourcesJar
+                artifact javadocJar
+                
+                pom {
+                    name = project.POM_NAME
+                    description = project.POM_ARTIFACT_ID
+                    url = project.POM_URL
+                    
+                    licenses {
+                        license {
+                            name = 'GNU General Public License v3.0'
+                            url = 'https://www.gnu.org/licenses/gpl-3.0.en.html'
+                        }
+                    }
+                    
+                    developers {
+                        developer {
+                            id = 'joshjdevl'
+                            name = 'joshjdevl'
+                            email = 'joshjdevl@gmail.com'
+                        }
+                    }
+                    
+                    scm {
+                        connection = 'scm:git@github.com:joshjdevl/libsodium-jni.git'
+                        developerConnection = 'scm:git@github.com:joshjdevl/libsodium-jni.git'
+                        url = 'https://github.com/joshjdevl/libsodium-jni'
+                    }
+                }
+            }
+        }
+        
+        repositories {
+            maven {
+                def releasesRepoUrl = "https://oss.sonatype.org/service/local/staging/deploy/maven2/"
+                def snapshotsRepoUrl = "https://oss.sonatype.org/content/repositories/snapshots/"
+                url = version.endsWith('SNAPSHOT') ? snapshotsRepoUrl : releasesRepoUrl
+                
+                credentials {
+                    username = System.getenv('SONATYPE_USERNAME') ?: ''
+                    password = System.getenv('SONATYPE_PASSWORD') ?: ''
+                }
+            }
+        }
+    }
+}
+
+task javadoc(type: Javadoc) {
+    source = android.sourceSets.main.java.srcDirs
+    classpath += project.files(android.getBootClasspath().join(File.pathSeparator))
+}
+
+task javadocJar(type: Jar, dependsOn: javadoc) {
+    archiveClassifier.set('javadoc')
+    from javadoc.destinationDir
+}
+
+task sourcesJar(type: Jar) {
+    archiveClassifier.set('sources')
+    from android.sourceSets.main.java.srcDirs
+}
+
+signing {
+    required = { !project.VERSION_NAME.endsWith("SNAPSHOT") && gradle.taskGraph.hasTask("publish") }
+    sign publishing.publications
+}
+
+if (project==rootProject) {
+    nexusStaging {
+        packageGroup = "com.github.joshjdevl"
+    }
+}
+
