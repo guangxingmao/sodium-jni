@@ -1,5 +1,9 @@
 # Fork libsodium-jni and Fix to support 16kb
 
+# How to use
+
+[**download the newtest aar**](https://github.com/guangxingmao/sodium-jni/tree/main/example/Sodium/libsodium-jni-release)
+
 [![Build Status](https://travis-ci.org/joshjdevl/libsodium-jni.svg)](https://travis-ci.org/joshjdevl/libsodium-jni)
 [![Maven Central](https://maven-badges.herokuapp.com/maven-central/com.github.joshjdevl.libsodiumjni/libsodium-jni/badge.svg)](https://oss.sonatype.org/#nexus-search;quick~libsodium)
 
